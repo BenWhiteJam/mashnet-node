@@ -1,5 +1,5 @@
 // KILT Blockchain – https://botlabs.org
-// Copyright (C) 2019-2022 BOTLabs GmbH
+// Copyright (C) 2019-2024 BOTLabs GmbH
 
 // The KILT Blockchain is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -26,37 +26,37 @@
 use std::sync::Arc;
 
 use jsonrpsee::RpcModule;
-use mashnet_node_runtime::opaque::Block;
-use runtime_common::{AccountId, Balance, Index};
-pub use sc_rpc_api::DenyUnsafe;
+
+use sc_rpc_api::DenyUnsafe;
 use sc_transaction_pool_api::TransactionPool;
 use sp_api::ProvideRuntimeApi;
 use sp_block_builder::BlockBuilder;
 use sp_blockchain::{Error as BlockChainError, HeaderBackend, HeaderMetadata};
 
+use runtime_common::{opaque::Block, AccountId, Balance, Nonce};
+
 /// Full client dependencies.
-pub struct FullDeps<C, P> {
+pub(crate) struct FullDeps<C, P> {
 	/// The client instance to use.
-	pub client: Arc<C>,
+	pub(crate) client: Arc<C>,
 	/// Transaction pool instance.
-	pub pool: Arc<P>,
+	pub(crate) pool: Arc<P>,
 	/// Whether to deny unsafe calls
-	pub deny_unsafe: DenyUnsafe,
+	pub(crate) deny_unsafe: DenyUnsafe,
 }
 
 /// Instantiate all full RPC extensions.
-pub fn create_full<C, P>(deps: FullDeps<C, P>) -> Result<RpcModule<()>, Box<dyn std::error::Error + Send + Sync>>
+pub(crate) fn create_full<C, P>(deps: FullDeps<C, P>) -> Result<RpcModule<()>, Box<dyn std::error::Error + Send + Sync>>
 where
-	C: ProvideRuntimeApi<Block>,
-	C: HeaderBackend<Block> + HeaderMetadata<Block, Error = BlockChainError> + 'static,
+	C: ProvideRuntimeApi<Block> + HeaderBackend<Block> + HeaderMetadata<Block, Error = BlockChainError> + 'static,
 	C: Send + Sync + 'static,
-	C::Api: frame_rpc_system::AccountNonceApi<Block, AccountId, Index>,
-	C::Api: pallet_transaction_payment_rpc::TransactionPaymentRuntimeApi<Block, Balance>,
-	C::Api: BlockBuilder<Block>,
+	C::Api: substrate_frame_rpc_system::AccountNonceApi<Block, AccountId, Nonce>
+		+ pallet_transaction_payment_rpc::TransactionPaymentRuntimeApi<Block, Balance>
+		+ BlockBuilder<Block>,
 	P: TransactionPool + 'static,
 {
-	use frame_rpc_system::{System, SystemApiServer};
 	use pallet_transaction_payment_rpc::{TransactionPayment, TransactionPaymentApiServer};
+	use substrate_frame_rpc_system::{System, SystemApiServer};
 
 	let mut module = RpcModule::new(());
 	let FullDeps {

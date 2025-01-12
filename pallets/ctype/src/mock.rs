@@ -1,5 +1,5 @@
 // KILT Blockchain – https://botlabs.org
-// Copyright (C) 2019-2022 BOTLabs GmbH
+// Copyright (C) 2019-2024 BOTLabs GmbH
 
 // The KILT Blockchain is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -36,15 +36,15 @@ where
 
 #[cfg(test)]
 pub mod runtime {
-	use frame_support::{parameter_types, weights::constants::RocksDbWeight};
+	use frame_support::{ord_parameter_types, parameter_types, weights::constants::RocksDbWeight};
+	use frame_system::EnsureSignedBy;
 	use kilt_support::mock::{mock_origin, SubjectId};
 	use sp_runtime::{
-		testing::Header,
 		traits::{BlakeTwo256, IdentifyAccount, IdentityLookup, Verify},
-		AccountId32, MultiSignature,
+		AccountId32, BuildStorage, MultiSignature,
 	};
 
-	use crate::{BalanceOf, Ctypes};
+	use crate::{BalanceOf, CtypeEntryOf, Ctypes};
 
 	use super::*;
 
@@ -60,15 +60,12 @@ pub mod runtime {
 	pub const MILLI_UNIT: Balance = 10u128.pow(12);
 
 	frame_support::construct_runtime!(
-		pub enum Test where
-			Block = Block,
-			NodeBlock = Block,
-			UncheckedExtrinsic = UncheckedExtrinsic,
+		pub enum Test
 		{
-			System: frame_system::{Pallet, Call, Config, Storage, Event<T>},
+			System: frame_system,
 			Ctype: crate::{Pallet, Call, Storage, Event<T>},
-			Balances: pallet_balances::{Pallet, Call, Storage, Event<T>},
-			MockOrigin: mock_origin::{Pallet, Origin<T>},
+			Balances: pallet_balances,
+			MockOrigin: mock_origin,
 		}
 	);
 
@@ -78,16 +75,17 @@ pub mod runtime {
 	}
 
 	impl frame_system::Config for Test {
-		type Origin = Origin;
-		type Call = Call;
-		type Index = u64;
-		type BlockNumber = u64;
+		type RuntimeTask = ();
+		type RuntimeOrigin = RuntimeOrigin;
+		type RuntimeCall = RuntimeCall;
+		type Block = Block;
+		type Nonce = u64;
+
 		type Hash = Hash;
 		type Hashing = BlakeTwo256;
 		type AccountId = AccountId;
 		type Lookup = IdentityLookup<Self::AccountId>;
-		type Header = Header;
-		type Event = ();
+		type RuntimeEvent = ();
 		type BlockHashCount = BlockHashCount;
 		type DbWeight = RocksDbWeight;
 		type Version = ();
@@ -112,9 +110,13 @@ pub mod runtime {
 	}
 
 	impl pallet_balances::Config for Test {
+		type RuntimeFreezeReason = ();
+		type FreezeIdentifier = ();
+		type RuntimeHoldReason = ();
+		type MaxFreezes = ();
 		type Balance = Balance;
 		type DustRemoval = ();
-		type Event = ();
+		type RuntimeEvent = ();
 		type ExistentialDeposit = ExistentialDeposit;
 		type AccountStore = System;
 		type WeightInfo = ();
@@ -124,7 +126,7 @@ pub mod runtime {
 	}
 
 	impl mock_origin::Config for Test {
-		type Origin = Origin;
+		type RuntimeOrigin = RuntimeOrigin;
 		type AccountId = AccountId;
 		type SubjectId = SubjectId;
 	}
@@ -133,11 +135,16 @@ pub mod runtime {
 		pub const Fee: Balance = 500;
 	}
 
+	ord_parameter_types! {
+		pub const OverarchingOrigin: AccountId = ACCOUNT_00;
+	}
+
 	impl Config for Test {
 		type CtypeCreatorId = SubjectId;
 		type EnsureOrigin = mock_origin::EnsureDoubleOrigin<AccountId, SubjectId>;
+		type OverarchingOrigin = EnsureSignedBy<OverarchingOrigin, AccountId>;
 		type OriginSuccess = mock_origin::DoubleOrigin<AccountId, SubjectId>;
-		type Event = ();
+		type RuntimeEvent = ();
 		type WeightInfo = ();
 
 		type Currency = Balances;
@@ -147,6 +154,7 @@ pub mod runtime {
 
 	pub(crate) const DID_00: SubjectId = SubjectId(AccountId32::new([1u8; 32]));
 	pub(crate) const ACCOUNT_00: AccountId = AccountId::new([1u8; 32]);
+	pub(crate) const ACCOUNT_01: AccountId = AccountId::new([2u8; 32]);
 
 	#[derive(Clone, Default)]
 	pub(crate) struct ExtBuilder {
@@ -166,7 +174,7 @@ pub mod runtime {
 		}
 
 		pub(crate) fn build(self) -> sp_io::TestExternalities {
-			let mut storage = frame_system::GenesisConfig::default().build_storage::<Test>().unwrap();
+			let mut storage = frame_system::GenesisConfig::<Test>::default().build_storage().unwrap();
 			pallet_balances::GenesisConfig::<Test> {
 				balances: self.balances.clone(),
 			}
@@ -176,7 +184,13 @@ pub mod runtime {
 
 			ext.execute_with(|| {
 				for (ctype_hash, owner) in self.ctypes_stored.iter() {
-					Ctypes::<Test>::insert(ctype_hash, owner);
+					Ctypes::<Test>::insert(
+						ctype_hash,
+						CtypeEntryOf::<Test> {
+							creator: owner.clone(),
+							created_at: System::block_number(),
+						},
+					);
 				}
 			});
 
@@ -185,12 +199,12 @@ pub mod runtime {
 
 		#[cfg(feature = "runtime-benchmarks")]
 		pub(crate) fn build_with_keystore(self) -> sp_io::TestExternalities {
-			use sp_keystore::{testing::KeyStore, KeystoreExt};
+			use sp_keystore::{testing::MemoryKeystore, KeystoreExt};
 			use sp_std::sync::Arc;
 
 			let mut ext = self.build();
 
-			let keystore = KeyStore::new();
+			let keystore = MemoryKeystore::new();
 			ext.register_extension(KeystoreExt(Arc::new(keystore)));
 
 			ext
