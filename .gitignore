@@ -9,10 +9,20 @@
 # IntelliJ project files
 *.iml
 
+# ignore env files
+.env
+# but not the ones for our Zombienet setup
+!zombienet/**/.env
+
 # ignore vscode settings
 .vscode
 
-# Custom Polkadot-js apps types
-pallets/did/src/custom_types.json
+**/node_modules
+**/.yarn/*
+!**/.yarn/releases
 
-**/__pycache__
+runtimes/spiritnet/src/xcm_tests/e2e/out
+
+chopsticks/**/db.sqlite*
+chopsticks/**/extra.yaml
+chopsticks/**/.tmp.yaml

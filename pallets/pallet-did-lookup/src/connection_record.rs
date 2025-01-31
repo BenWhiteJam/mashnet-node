@@ -1,5 +1,5 @@
 // KILT Blockchain – https://botlabs.org
-// Copyright (C) 2019-2022 BOTLabs GmbH
+// Copyright (C) 2019-2024 BOTLabs GmbH
 
 // The KILT Blockchain is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -16,12 +16,13 @@
 
 // If you feel like getting in touch with us, you can do so at info@botlabs.org
 
-use codec::{Decode, Encode, MaxEncodedLen};
-use kilt_support::deposit::Deposit;
+use kilt_support::Deposit;
+use parity_scale_codec::{Decode, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
+use serde::{Deserialize, Serialize};
 
 /// A record in the ConnectedDid map.
-#[derive(Clone, Decode, Debug, Encode, TypeInfo, PartialEq, MaxEncodedLen)]
+#[derive(Clone, Decode, Debug, Encode, TypeInfo, Eq, PartialEq, MaxEncodedLen, Serialize, Deserialize)]
 pub struct ConnectionRecord<DidIdentifier, Account, Balance> {
 	/// The did that is connected to the key under which the record was stored.
 	pub did: DidIdentifier,

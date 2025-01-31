@@ -1,5 +1,5 @@
 // KILT Blockchain – https://botlabs.org
-// Copyright (C) 2019-2022 BOTLabs GmbH
+// Copyright (C) 2019-2024 BOTLabs GmbH
 
 // The KILT Blockchain is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -16,10 +16,10 @@
 
 // If you feel like getting in touch with us, you can do so at info@botlabs.org
 
-use frame_support::dispatch;
 use kilt_support::signature::{SignatureVerificationError, SignatureVerificationResult, VerifySignature};
 use sp_runtime::SaturatedConversion;
 use sp_std::{marker::PhantomData, vec::Vec};
+use sp_weights::Weight;
 
 use crate::{
 	did_details::{DidSignature, DidVerificationKeyRelationship},
@@ -28,7 +28,10 @@ use crate::{
 };
 
 pub struct DidSignatureVerify<T>(PhantomData<T>);
-impl<T: Config> VerifySignature for DidSignatureVerify<T> {
+impl<T: Config> VerifySignature for DidSignatureVerify<T>
+where
+	T::AccountId: AsRef<[u8; 32]> + From<[u8; 32]>,
+{
 	type SignerId = <T as Config>::DidIdentifier;
 	type Payload = Vec<u8>;
 	type Signature = DidSignature;
@@ -49,12 +52,12 @@ impl<T: Config> VerifySignature for DidSignatureVerify<T> {
 		)
 		.map_err(|err| match err {
 			// Should never happen as a DID has always a valid authentication key and UrlErrors are never thrown here.
-			DidError::SignatureError(_) => SignatureVerificationError::SignatureInvalid,
+			DidError::Signature(_) => SignatureVerificationError::SignatureInvalid,
 			_ => SignatureVerificationError::SignerInformationNotPresent,
 		})
 	}
 
-	fn weight(payload_byte_length: usize) -> dispatch::Weight {
+	fn weight(payload_byte_length: usize) -> Weight {
 		<T as Config>::WeightInfo::signature_verification_sr25519(payload_byte_length.saturated_into())
 			.max(<T as Config>::WeightInfo::signature_verification_ed25519(
 				payload_byte_length.saturated_into(),

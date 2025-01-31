@@ -1,5 +1,5 @@
 // KILT Blockchain – https://botlabs.org
-// Copyright (C) 2019-2022 BOTLabs GmbH
+// Copyright (C) 2019-2024 BOTLabs GmbH
 
 // The KILT Blockchain is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -16,20 +16,21 @@
 
 // If you feel like getting in touch with us, you can do so at info@botlabs.org
 
-use frame_support::traits::{Currency, Get};
+use frame_support::traits::{
+	fungible::{Credit, Inspect},
+	Get,
+};
 use parity_scale_codec::{Decode, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 use sp_runtime::{
-	traits::{AtLeast32BitUnsigned, Saturating, Zero},
+	traits::{AtLeast32BitUnsigned, CheckedSub, Saturating, Zero},
 	RuntimeDebug,
 };
 use sp_staking::SessionIndex;
 use sp_std::{
 	cmp::Ordering,
-	convert::TryInto,
 	fmt::Debug,
 	ops::{Add, Sub},
-	vec,
 };
 
 use crate::{set::OrderedSet, Config};
@@ -39,12 +40,7 @@ use crate::{set::OrderedSet, Config};
 /// The stake has a destination account (to which the stake is directed) and an
 /// amount of funds staked.
 #[derive(Default, Clone, Encode, Decode, RuntimeDebug, PartialEq, Eq, TypeInfo, MaxEncodedLen)]
-#[codec(mel_bound(AccountId: MaxEncodedLen, Balance: MaxEncodedLen))]
-pub struct Stake<AccountId, Balance>
-where
-	AccountId: Eq + Ord,
-	Balance: Eq + Ord,
-{
+pub struct Stake<AccountId, Balance> {
 	/// The account that is backed by the stake.
 	pub owner: AccountId,
 
@@ -89,28 +85,20 @@ impl<AccountId: Ord, Balance: PartialEq + Ord> Ord for Stake<AccountId, Balance>
 }
 
 /// The activity status of the collator.
-#[derive(Copy, Clone, PartialEq, Eq, Encode, Decode, RuntimeDebug, TypeInfo, MaxEncodedLen)]
+#[derive(Copy, Clone, Default, PartialEq, Eq, Encode, Decode, RuntimeDebug, TypeInfo, MaxEncodedLen)]
 pub enum CandidateStatus {
 	/// Committed to be online and producing valid blocks (not equivocating)
+	#[default]
 	Active,
 	/// Staked until the inner round
 	Leaving(SessionIndex),
 }
 
-impl Default for CandidateStatus {
-	fn default() -> CandidateStatus {
-		CandidateStatus::Active
-	}
-}
-
 #[derive(Encode, Decode, Clone, RuntimeDebug, PartialEq, Eq, TypeInfo, MaxEncodedLen)]
 #[scale_info(skip_type_params(MaxDelegatorsPerCandidate))]
-#[codec(mel_bound(AccountId: MaxEncodedLen, Balance: MaxEncodedLen))]
 /// Global collator state with commission fee, staked funds, and delegations
 pub struct Candidate<AccountId, Balance, MaxDelegatorsPerCandidate>
 where
-	AccountId: Eq + Ord + Debug,
-	Balance: Eq + Ord + Debug,
 	MaxDelegatorsPerCandidate: Get<u32> + Debug + PartialEq,
 {
 	/// Account id of the candidate.
@@ -132,6 +120,8 @@ where
 	pub status: CandidateStatus,
 }
 
+// We access indices only after making sure they are properly verified.
+#[allow(clippy::indexing_slicing)]
 impl<A, B, S> Candidate<A, B, S>
 where
 	A: Ord + Clone + Debug,
@@ -153,11 +143,11 @@ where
 		self.status == CandidateStatus::Active
 	}
 
-	pub fn is_leaving(&self) -> bool {
+	pub const fn is_leaving(&self) -> bool {
 		matches!(self.status, CandidateStatus::Leaving(_))
 	}
 
-	pub fn can_exit(&self, when: u32) -> bool {
+	pub const fn can_exit(&self, when: u32) -> bool {
 		matches!(self.status, CandidateStatus::Leaving(at) if at <= when )
 	}
 
@@ -173,13 +163,11 @@ where
 	// Returns None if underflow or less == self.stake (in which case collator
 	// should leave).
 	pub fn stake_less(&mut self, less: B) -> Option<B> {
-		if self.stake > less {
+		(self.stake > less).then(|| {
 			self.stake = self.stake.saturating_sub(less);
 			self.total = self.total.saturating_sub(less);
-			Some(self.stake)
-		} else {
-			None
-		}
+			self.stake
+		})
 	}
 
 	pub fn inc_delegator(&mut self, delegator: A, more: B) {
@@ -211,99 +199,44 @@ where
 	}
 }
 
-#[derive(Encode, Decode, RuntimeDebug, PartialEq, TypeInfo, MaxEncodedLen)]
-#[scale_info(skip_type_params(MaxCollatorsPerDelegator))]
-#[codec(mel_bound(AccountId: MaxEncodedLen, Balance: MaxEncodedLen))]
-pub struct Delegator<AccountId: Eq + Ord, Balance: Eq + Ord, MaxCollatorsPerDelegator: Get<u32>> {
-	pub delegations: OrderedSet<Stake<AccountId, Balance>, MaxCollatorsPerDelegator>,
-	pub total: Balance,
-}
-
-impl<AccountId, Balance, MaxCollatorsPerDelegator> Delegator<AccountId, Balance, MaxCollatorsPerDelegator>
+pub type Delegator<AccountId, Balance> = Stake<AccountId, Balance>;
+impl<AccountId, Balance> Delegator<AccountId, Balance>
 where
 	AccountId: Eq + Ord + Clone + Debug,
-	Balance: Copy + Add<Output = Balance> + Saturating + PartialOrd + Eq + Ord + Debug + Zero,
-	MaxCollatorsPerDelegator: Get<u32> + Debug + PartialEq,
+	Balance: Copy + Add<Output = Balance> + Saturating + PartialOrd + Eq + Ord + Debug + Zero + Default + CheckedSub,
 {
-	pub fn try_new(collator: AccountId, amount: Balance) -> Result<Self, ()> {
-		Ok(Delegator {
-			delegations: OrderedSet::from(
-				vec![Stake {
-					owner: collator,
-					amount,
-				}]
-				.try_into()?,
-			),
-			total: amount,
-		})
-	}
-
-	/// Adds a new delegation.
-	///
-	/// If already delegating to the same account, this call returns false and
-	/// doesn't insert the new delegation.
-	pub fn add_delegation(&mut self, stake: Stake<AccountId, Balance>) -> Result<bool, ()> {
-		let amt = stake.amount;
-		if self.delegations.try_insert(stake).map_err(|_| ())? {
-			self.total = self.total.saturating_add(amt);
-			Ok(true)
+	/// Returns Ok if the delegation for the
+	/// collator exists and `Err` otherwise.
+	pub fn try_clear(&mut self, collator: AccountId) -> Result<(), ()> {
+		if self.owner == collator {
+			self.amount = Balance::zero();
+			Ok(())
 		} else {
-			Ok(false)
+			Err(())
 		}
 	}
 
-	/// Returns Some(remaining stake for delegator) if the delegation for the
-	/// collator exists. Returns `None` otherwise.
-	pub fn rm_delegation(&mut self, collator: &AccountId) -> Option<Balance> {
-		let amt = self.delegations.remove(&Stake::<AccountId, Balance> {
-			owner: collator.clone(),
-			// amount is irrelevant for removal
-			amount: Balance::zero(),
-		});
-
-		if let Some(Stake::<AccountId, Balance> { amount: balance, .. }) = amt {
-			self.total = self.total.saturating_sub(balance);
-			Some(self.total)
+	/// Returns Ok(delegated_amount) if successful, `Err` if delegation was
+	/// not found.
+	pub fn try_increment(&mut self, collator: AccountId, more: Balance) -> Result<Balance, ()> {
+		if self.owner == collator {
+			self.amount = self.amount.saturating_add(more);
+			Ok(self.amount)
 		} else {
-			None
+			Err(())
 		}
 	}
 
-	/// Returns None if delegation was not found.
-	pub fn inc_delegation(&mut self, collator: AccountId, more: Balance) -> Option<Balance> {
-		if let Ok(i) = self.delegations.linear_search(&Stake::<AccountId, Balance> {
-			owner: collator,
-			amount: Balance::zero(),
-		}) {
-			self.delegations
-				.mutate(|vec| vec[i].amount = vec[i].amount.saturating_add(more));
-			self.total = self.total.saturating_add(more);
-			self.delegations.sort_greatest_to_lowest();
-			Some(self.delegations[i].amount)
+	/// Returns Ok(Some(delegated_amount)) if successful, `Err` if delegation
+	/// was not found and Ok(None) if delegated stake would underflow.
+	pub fn try_decrement(&mut self, collator: AccountId, less: Balance) -> Result<Option<Balance>, ()> {
+		if self.owner == collator {
+			Ok(self.amount.checked_sub(&less).map(|new| {
+				self.amount = new;
+				self.amount
+			}))
 		} else {
-			None
-		}
-	}
-
-	/// Returns Some(Some(balance)) if successful, None if delegation was not
-	/// found and Some(None) if delegated stake would underflow.
-	pub fn dec_delegation(&mut self, collator: AccountId, less: Balance) -> Option<Option<Balance>> {
-		if let Ok(i) = self.delegations.linear_search(&Stake::<AccountId, Balance> {
-			owner: collator,
-			amount: Balance::zero(),
-		}) {
-			if self.delegations[i].amount > less {
-				self.delegations
-					.mutate(|vec| vec[i].amount = vec[i].amount.saturating_sub(less));
-				self.total = self.total.saturating_sub(less);
-				self.delegations.sort_greatest_to_lowest();
-				Some(Some(self.delegations[i].amount))
-			} else {
-				// underflow error; should rm entire delegation
-				Some(None)
-			}
-		} else {
-			None
+			Err(())
 		}
 	}
 }
@@ -323,7 +256,7 @@ impl<B> RoundInfo<B>
 where
 	B: Copy + Saturating + From<u32> + PartialOrd,
 {
-	pub fn new(current: SessionIndex, first: B, length: B) -> RoundInfo<B> {
+	pub const fn new(current: SessionIndex, first: B, length: B) -> RoundInfo<B> {
 		RoundInfo { current, first, length }
 	}
 
@@ -363,7 +296,7 @@ pub struct TotalStake<Balance: Default> {
 
 /// The number of delegations a delegator has done within the last session in
 /// which they delegated.
-#[derive(Default, Clone, Encode, Decode, RuntimeDebug, PartialEq, TypeInfo, MaxEncodedLen)]
+#[derive(Default, Clone, Encode, Decode, Eq, MaxEncodedLen, PartialEq, RuntimeDebug, TypeInfo)]
 pub struct DelegationCounter {
 	/// The index of the last delegation.
 	pub round: SessionIndex,
@@ -371,15 +304,8 @@ pub struct DelegationCounter {
 	pub counter: u32,
 }
 
-/// Internal type which is only used when a delegator is replaced by another
-/// one to delay the storage entry removal until failure cannot happen anymore.
-pub(crate) struct ReplacedDelegator<T: Config> {
-	pub who: AccountIdOf<T>,
-	pub state: Option<Delegator<AccountIdOf<T>, BalanceOf<T>, T::MaxCollatorsPerDelegator>>,
-}
-
 pub type AccountIdOf<T> = <T as frame_system::Config>::AccountId;
-pub type BalanceOf<T> = <<T as Config>::Currency as Currency<AccountIdOf<T>>>::Balance;
+pub type BalanceOf<T> = <<T as Config>::Currency as Inspect<AccountIdOf<T>>>::Balance;
 pub type CandidateOf<T, S> = Candidate<AccountIdOf<T>, BalanceOf<T>, S>;
 pub type StakeOf<T> = Stake<AccountIdOf<T>, BalanceOf<T>>;
-pub type NegativeImbalanceOf<T> = <<T as Config>::Currency as Currency<AccountIdOf<T>>>::NegativeImbalance;
+pub(crate) type CreditOf<T> = Credit<<T as frame_system::Config>::AccountId, <T as Config>::Currency>;

@@ -1,5 +1,5 @@
 // KILT Blockchain – https://botlabs.org
-// Copyright (C) 2019-2022 BOTLabs GmbH
+// Copyright (C) 2019-2024 BOTLabs GmbH
 
 // The KILT Blockchain is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -16,75 +16,145 @@
 
 // If you feel like getting in touch with us, you can do so at info@botlabs.org
 
-use crate::{Config, ConnectedAccounts, ConnectedDids, Pallet};
 use frame_support::{
-	dispatch::Weight,
-	traits::{Get, GetStorageVersion, OnRuntimeUpgrade},
+	pallet_prelude::DispatchResult,
+	traits::{fungible::Inspect, ReservableCurrency},
 };
-use sp_std::marker::PhantomData;
+use kilt_support::migration::switch_reserved_to_hold;
 
-pub struct LookupReverseIndexMigration<T>(PhantomData<T>);
+use crate::{linkable_account::LinkableAccountId, AccountIdOf, Config, ConnectedDids, CurrencyOf, Error, HoldReason};
 
-impl<T: Config> OnRuntimeUpgrade for LookupReverseIndexMigration<T> {
-	#[cfg(feature = "try-runtime")]
-	fn pre_upgrade() -> Result<(), &'static str> {
-		assert!(Pallet::<T>::on_chain_storage_version() < Pallet::<T>::current_storage_version());
-		assert_eq!(ConnectedAccounts::<T>::iter().count(), 0);
+pub fn update_balance_for_did_lookup<T: Config>(key: &LinkableAccountId) -> DispatchResult
+where
+	T::Currency: ReservableCurrency<T::AccountId, Balance = <T::Currency as Inspect<AccountIdOf<T>>>::Balance>,
+{
+	let details = ConnectedDids::<T>::get(key).ok_or(Error::<T>::NotFound)?;
+	switch_reserved_to_hold::<AccountIdOf<T>, CurrencyOf<T, ()>>(
+		&details.deposit.owner,
+		&HoldReason::Deposit.into(),
+		details.deposit.amount,
+	)
+}
 
-		log::info!(
-			"👥  DID lookup pallet to {:?} passes PRE migrate checks ✅",
-			Pallet::<T>::current_storage_version()
-		);
+#[cfg(test)]
+pub mod test {
+	use frame_support::{
+		assert_noop, assert_ok,
+		traits::{fungible::InspectHold, ReservableCurrency},
+	};
+	use sp_runtime::traits::Zero;
 
-		Ok(())
+	use crate::{
+		migrations::update_balance_for_did_lookup, mock::*, AccountIdOf, Config, ConnectedDids, Error, HoldReason,
+	};
+
+	#[test]
+	fn test_setup() {
+		ExtBuilder::default()
+			.with_balances(vec![
+				(ACCOUNT_00, <Test as crate::Config>::Deposit::get() * 50),
+				(ACCOUNT_01, <Test as crate::Config>::Deposit::get() * 50),
+			])
+			.with_connections(vec![(ACCOUNT_00, DID_00, LINKABLE_ACCOUNT_00)])
+			.build_and_execute_with_sanity_tests(|| {
+				let hold_balance_pre_migration =
+					<<Test as Config>::Currency as InspectHold<AccountIdOf<Test>>>::balance_on_hold(
+						&HoldReason::Deposit.into(),
+						&ACCOUNT_00,
+					);
+
+				assert_eq!(hold_balance_pre_migration, <Test as Config>::Deposit::get());
+
+				kilt_support::migration::translate_holds_to_reserve::<Test>(HoldReason::Deposit.into());
+
+				let hold_balance = <<Test as Config>::Currency as InspectHold<AccountIdOf<Test>>>::balance_on_hold(
+					&HoldReason::Deposit.into(),
+					&ACCOUNT_00,
+				);
+
+				let reserved_balance =
+					<<Test as Config>::Currency as ReservableCurrency<AccountIdOf<Test>>>::reserved_balance(
+						&ACCOUNT_00,
+					);
+
+				assert!(hold_balance.is_zero());
+				assert_eq!(reserved_balance, <Test as Config>::Deposit::get());
+			})
 	}
 
-	fn on_runtime_upgrade() -> frame_support::weights::Weight {
-		// Account for the new storage version written below.
-		let initial_weight = T::DbWeight::get().writes(1);
+	#[test]
+	fn test_balance_migration_did_lookup() {
+		ExtBuilder::default()
+			.with_balances(vec![
+				(ACCOUNT_00, <Test as crate::Config>::Deposit::get() * 50),
+				(ACCOUNT_01, <Test as crate::Config>::Deposit::get() * 50),
+			])
+			.with_connections(vec![(ACCOUNT_00, DID_00, LINKABLE_ACCOUNT_00)])
+			.build_and_execute_with_sanity_tests(|| {
+				kilt_support::migration::translate_holds_to_reserve::<Test>(HoldReason::Deposit.into());
 
-		// Origin was disabled, so there cannot be any existing links. But we check just
-		// to be sure.
-		let total_weight: Weight =
-			ConnectedDids::<T>::iter().fold(initial_weight, |total_weight, (account, record)| {
-				ConnectedAccounts::<T>::insert(record.did, account, ());
-				// One read for the `ConnectedDids` entry, one write for the new
-				// `ConnectedAccounts` entry.
-				total_weight.saturating_add(T::DbWeight::get().reads_writes(1, 1))
-			});
+				// before the migration the balance should be reseved and not on
+				// hold.
+				let hold_balance = <<Test as Config>::Currency as InspectHold<AccountIdOf<Test>>>::balance_on_hold(
+					&HoldReason::Deposit.into(),
+					&ACCOUNT_00,
+				);
 
-		Pallet::<T>::current_storage_version().put::<Pallet<T>>();
+				let reserved_balance =
+					<<Test as Config>::Currency as ReservableCurrency<AccountIdOf<Test>>>::reserved_balance(
+						&ACCOUNT_00,
+					);
 
-		log::info!(
-			"👥  completed DID lookup pallet migration to {:?} ✅",
-			Pallet::<T>::current_storage_version()
-		);
+				assert!(hold_balance.is_zero());
+				assert_eq!(reserved_balance, <Test as Config>::Deposit::get());
 
-		total_weight
-	}
+				let connected_did_pre_migration = ConnectedDids::<Test>::get(LINKABLE_ACCOUNT_00);
 
-	#[cfg(feature = "try-runtime")]
-	fn post_upgrade() -> Result<(), &'static str> {
-		assert_eq!(
-			Pallet::<T>::on_chain_storage_version(),
-			Pallet::<T>::current_storage_version()
-		);
+				let reserved_pre_migration =
+					<<Test as Config>::Currency as ReservableCurrency<AccountIdOf<Test>>>::reserved_balance(
+						&ACCOUNT_00,
+					);
 
-		// Verify DID -> Account integrity.
-		ConnectedDids::<T>::iter().for_each(|(account, record)| {
-			assert!(ConnectedAccounts::<T>::contains_key(record.did, account));
-		});
-		// Verify Account -> DID integrity.
-		ConnectedAccounts::<T>::iter().for_each(|(did, account, _)| {
-			let entry = ConnectedDids::<T>::get(account).expect("Should find a record for the given account.");
-			assert_eq!(entry.did, did);
-		});
+				//Connected did should be in storage
+				assert!(connected_did_pre_migration.is_some());
 
-		log::info!(
-			"👥  DID lookup pallet to {:?} passes POST migrate checks ✅",
-			Pallet::<T>::current_storage_version()
-		);
+				// before the migration the deposit should be reserved.
+				assert_eq!(
+					reserved_pre_migration,
+					connected_did_pre_migration.clone().unwrap().deposit.amount
+				);
 
-		Ok(())
+				assert_ok!(update_balance_for_did_lookup::<Test>(&LINKABLE_ACCOUNT_00));
+
+				let connected_did_post_migration = ConnectedDids::<Test>::get(LINKABLE_ACCOUNT_00);
+
+				let reserved_post_migration =
+					<<Test as Config>::Currency as ReservableCurrency<AccountIdOf<Test>>>::reserved_balance(
+						&ACCOUNT_00,
+					);
+
+				let balance_on_hold = <<Test as Config>::Currency as InspectHold<AccountIdOf<Test>>>::balance_on_hold(
+					&HoldReason::Deposit.into(),
+					&ACCOUNT_00,
+				);
+
+				//Delegation should be still in the storage
+				assert!(connected_did_post_migration.is_some());
+
+				// ... and it should be the same
+				assert_eq!(connected_did_post_migration, connected_did_pre_migration);
+
+				// Since reserved balance count to hold balance, it should not be zero
+				assert!(!reserved_post_migration.is_zero());
+
+				// ... and be as much as the hold balance
+				assert_eq!(reserved_post_migration, balance_on_hold);
+
+				// should throw error if connected did does not exist
+				assert_noop!(
+					update_balance_for_did_lookup::<Test>(&LINKABLE_ACCOUNT_01),
+					Error::<Test>::NotFound
+				);
+			})
 	}
 }

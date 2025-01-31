@@ -1,5 +1,5 @@
 // KILT Blockchain – https://botlabs.org
-// Copyright (C) 2019-2022 BOTLabs GmbH
+// Copyright (C) 2019-2024 BOTLabs GmbH
 
 // The KILT Blockchain is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -18,13 +18,23 @@
 
 use frame_support::{
 	parameter_types,
-	weights::{constants::WEIGHT_PER_SECOND, Weight},
+	traits::WithdrawReasons,
+	weights::{constants::WEIGHT_REF_TIME_PER_SECOND, Weight},
 };
 use sp_runtime::{Perbill, Percent, Perquintill};
 
 use parachain_staking::InflationInfo;
 
 use crate::{Balance, BlockNumber};
+
+/// Maximum number of blocks simultaneously accepted by the Runtime, not yet
+/// included into the relay chain.
+pub const UNINCLUDED_SEGMENT_CAPACITY: u32 = 1;
+/// How many parachain blocks are processed by the relay chain per parent.
+/// Limits the number of blocks authored per slot.
+pub const BLOCK_PROCESSING_VELOCITY: u32 = 1;
+/// Relay chain slot duration, in milliseconds.
+pub const RELAY_CHAIN_SLOT_DURATION_MILLIS: u32 = 6000;
 
 /// This determines the average expected block time that we are targetting.
 /// Blocks will be produced at a minimum duration defined by `SLOT_DURATION`.
@@ -37,10 +47,13 @@ pub const MILLISECS_PER_BLOCK: u64 = 12_000;
 pub const SLOT_DURATION: u64 = MILLISECS_PER_BLOCK;
 
 // Time is measured by number of blocks.
+#[allow(clippy::integer_division)]
+#[allow(clippy::as_conversions)]
 pub const MINUTES: BlockNumber = 60_000 / (MILLISECS_PER_BLOCK as BlockNumber);
 pub const HOURS: BlockNumber = MINUTES * 60;
 pub const DAYS: BlockNumber = HOURS * 24;
 // Julian year as Substrate handles it
+#[allow(clippy::integer_division)]
 pub const BLOCKS_PER_YEAR: BlockNumber = DAYS * 36525 / 100;
 
 pub const MAX_COLLATOR_STAKE: Balance = 200_000 * KILT;
@@ -54,6 +67,13 @@ pub const MILLI_KILT: Balance = 10u128.pow(12);
 /// 0.000_001 KILT
 pub const MICRO_KILT: Balance = 10u128.pow(9);
 
+pub const EXISTENTIAL_DEPOSIT: Balance = 10 * MILLI_KILT;
+
+/// Deposit that must be provided for each occupied storage item.
+pub const DEPOSIT_STORAGE_ITEM: Balance = 56 * MILLI_KILT;
+
+/// Deposit that must be provided for each occupied storage byte.
+pub const DEPOSIT_STORAGE_BYTE: Balance = 50 * MICRO_KILT;
 // 1 in 4 blocks (on average, not counting collisions) will be primary babe
 // blocks.
 pub const PRIMARY_PROBABILITY: (u64, u64) = (1, 4);
@@ -65,7 +85,11 @@ pub const AVERAGE_ON_INITIALIZE_RATIO: Perbill = Perbill::from_percent(10);
 /// used by  Operational  extrinsics.
 pub const NORMAL_DISPATCH_RATIO: Perbill = Perbill::from_percent(75);
 /// We allow for 0.5 seconds of compute with a 12 second average block time.
-pub const MAXIMUM_BLOCK_WEIGHT: Weight = WEIGHT_PER_SECOND / 2;
+#[allow(clippy::as_conversions)]
+pub const MAXIMUM_BLOCK_WEIGHT: Weight = Weight::from_parts(
+	WEIGHT_REF_TIME_PER_SECOND.saturating_div(2),
+	cumulus_primitives_core::relay_chain::MAX_POV_SIZE as u64,
+);
 
 pub const INFLATION_CONFIG: (Perquintill, Perquintill, Perquintill, Perquintill) = (
 	// max collator staking rate
@@ -95,8 +119,10 @@ pub fn kilt_inflation_config() -> InflationInfo {
 
 /// Calculate the storage deposit based on the number of storage items and the
 /// combined byte size of those items.
+#[allow(clippy::as_conversions)]
+#[allow(clippy::arithmetic_side_effects)]
 pub const fn deposit(items: u32, bytes: u32) -> Balance {
-	items as Balance * 56 * MILLI_KILT + (bytes as Balance) * 50 * MICRO_KILT
+	items as Balance * DEPOSIT_STORAGE_ITEM + (bytes as Balance) * DEPOSIT_STORAGE_BYTE
 }
 
 /// The size of an index in the index pallet.
@@ -109,6 +135,8 @@ pub const MAX_VESTING_SCHEDULES: u32 = 28;
 parameter_types! {
 	/// Vesting Pallet. Copied from Kusama & Polkadot runtime
 	pub const MinVestedTransfer: Balance = 100 * MILLI_KILT;
+	pub UnvestedFundsAllowedWithdrawReasons: WithdrawReasons =
+		WithdrawReasons::except(WithdrawReasons::TRANSFER | WithdrawReasons::RESERVE);
 	/// Deposits per byte
 	pub const ByteDeposit: Balance = deposit(0, 1);
 	/// Index Pallet. Deposit taken for an account index
@@ -130,7 +158,56 @@ pub mod attestation {
 	}
 }
 
+pub mod bonded_coins {
+	use super::*;
+
+	/// The size is checked in the runtime by a test.
+	pub const MAX_POOL_BYTE_LENGTH: u32 = 986;
+	pub const BASE_DEPOSIT: Balance = deposit(1, MAX_POOL_BYTE_LENGTH);
+	const ASSET_ID_BYTE_LENGTH: u32 = 8;
+	/// https://github.com/paritytech/polkadot-sdk/blob/master/substrate/frame/assets/src/types.rs#L188
+	const ASSET_METADATA_BYTE_LENGTH: u32 = 26;
+	pub const DEPOSIT_PER_CURRENCY: Balance = deposit(1, ASSET_ID_BYTE_LENGTH + (2 * ASSET_METADATA_BYTE_LENGTH));
+	pub const MAX_CURRENCIES: u32 = 50;
+	pub const MAX_DENOMINATION: u8 = 15;
+	pub const MAX_STRING_LENGTH: u32 = crate::constants::bonded_assets::STRING_LIMIT;
+}
+
+pub mod bonded_assets {
+	pub const APPROVAL_DEPOSIT: u128 = 0;
+	pub const ASSET_ACCOUNT_DEPOSIT: u128 = 0;
+	pub const ASSET_DEPOSIT: u128 = 0;
+	pub const META_DEPOSIT_BASE: u128 = 0;
+	pub const META_DEPOSIT_PER_BYTE: u128 = 0;
+	pub const REMOVE_ITEMS_LIMIT: u32 = 1000;
+	pub const STRING_LIMIT: u32 = 50;
+}
+
+pub mod assets {
+	use super::*;
+
+	pub const APPROVAL_DEPOSIT: u128 = 0;
+	pub const ASSET_ACCOUNT_DEPOSIT: u128 = 0;
+	pub const ASSET_DEPOSIT: u128 = 0;
+	pub const META_DEPOSIT_BASE: u128 = 0;
+	pub const META_DEPOSIT_PER_BYTE: u128 = 0;
+	pub const REMOVE_ITEMS_LIMIT: u32 = 1000;
+	pub const STRING_LIMIT: u32 = 4;
+
+	parameter_types! {
+		pub const ApprovalDeposit: u128 = APPROVAL_DEPOSIT;
+		pub const AssetAccountDeposit: u128 = ASSET_ACCOUNT_DEPOSIT;
+		pub const AssetDeposit: u128 = ASSET_DEPOSIT;
+		pub const MetaDepositBase: u128 = META_DEPOSIT_BASE;
+		pub const MetaDepositPerByte: u128 = META_DEPOSIT_PER_BYTE;
+		pub const RemoveItemsLimit: u32 = REMOVE_ITEMS_LIMIT;
+		pub const StringLimit: u32 = STRING_LIMIT;
+	}
+}
+
 pub mod delegation {
+	use scale_info::TypeInfo;
+
 	use super::*;
 
 	pub const DELEGATION_DEPOSIT: Balance = KILT;
@@ -145,10 +222,26 @@ pub mod delegation {
 		pub const MaxParentChecks: u32 = MAX_PARENT_CHECKS;
 		pub const MaxRevocations: u32 = MAX_REVOCATIONS;
 		pub const MaxRemovals: u32 = MAX_REMOVALS;
-		#[derive(Clone)]
+		#[derive(Clone, TypeInfo)]
 		pub const MaxChildren: u32 = MAX_CHILDREN;
 		pub const DelegationDeposit: Balance = DELEGATION_DEPOSIT;
 	}
+}
+
+pub mod deposit_storage {
+	// Keys is an enum with a single variant (DidIdentifier,
+	// IdentityCommitmentVersion) which is 32 + 2 = 34 bytes. Adding the
+	// discriminant byte, it totals to 35 bytes.
+	pub const MAX_DEPOSIT_PALLET_KEY_LENGTH: u32 = 35;
+}
+
+pub mod dip_provider {
+	use super::*;
+
+	pub const MAX_LINKED_ACCOUNTS: u32 = 10;
+	// Commitment are 32-byte hashes.
+	pub const MAX_COMMITMENT_BYTE_LENGTH: u32 = 32;
+	pub const COMMITMENT_DEPOSIT: Balance = deposit(1, MAX_COMMITMENT_BYTE_LENGTH);
 }
 
 pub mod staking {
@@ -201,17 +294,14 @@ pub mod staking {
 		/// We only allow one delegation per round.
 		pub const MaxDelegationsPerRound: u32 = 1;
 		/// Maximum 25 delegators per collator at launch, might be increased later
-		#[derive(Debug, PartialEq)]
+		#[derive(Debug, Eq, PartialEq)]
 		pub const MaxDelegatorsPerCollator: u32 = MAX_DELEGATORS_PER_COLLATOR;
-		/// Maximum 1 collator per delegator at launch, will be increased later
-		#[derive(Debug, PartialEq)]
-		pub const MaxCollatorsPerDelegator: u32 = 1;
 		/// Minimum stake required to be reserved to be a collator is 10_000
 		pub const MinCollatorStake: Balance = 10_000 * KILT;
 		/// Minimum stake required to be reserved to be a delegator is 1000
 		pub const MinDelegatorStake: Balance = MIN_DELEGATOR_STAKE;
 		/// Maximum number of collator candidates
-		#[derive(Debug, PartialEq)]
+		#[derive(Debug, Eq, PartialEq)]
 		pub const MaxCollatorCandidates: u32 = MAX_CANDIDATES;
 		/// Maximum number of concurrent requests to unlock unstaked balance
 		pub const MaxUnstakeRequests: u32 = 10;
@@ -270,12 +360,12 @@ pub mod governance {
 	#[cfg(feature = "fast-gov")]
 	pub const COUNCIL_MOTION_DURATION: BlockNumber = 4 * MINUTES;
 	#[cfg(not(feature = "fast-gov"))]
-	pub const COUNCIL_MOTION_DURATION: BlockNumber = 3 * DAYS;
+	pub const COUNCIL_MOTION_DURATION: BlockNumber = 7 * DAYS;
 
 	#[cfg(feature = "fast-gov")]
 	pub const TECHNICAL_MOTION_DURATION: BlockNumber = 4 * MINUTES;
 	#[cfg(not(feature = "fast-gov"))]
-	pub const TECHNICAL_MOTION_DURATION: BlockNumber = 3 * DAYS;
+	pub const TECHNICAL_MOTION_DURATION: BlockNumber = 7 * DAYS;
 
 	parameter_types! {
 		// Democracy Pallet
@@ -293,46 +383,92 @@ pub mod governance {
 		pub const TechnicalMotionDuration: BlockNumber = TECHNICAL_MOTION_DURATION;
 		pub const TechnicalMaxProposals: u32 = 100;
 		pub const TechnicalMaxMembers: u32 = 100;
+		// Tipper Group
+		pub const TipperMaxMembers: u32 = 21;
+	}
+}
+
+pub mod timestamp {
+	use super::*;
+
+	#[allow(clippy::integer_division)]
+	pub const MINIMUM_PERIOD: u64 = SLOT_DURATION / 2;
+}
+
+pub mod multisig {
+	use super::*;
+
+	parameter_types! {
+		pub const MaxSignitors: u32 = 64;
+		pub const DepositBase: Balance = DEPOSIT_STORAGE_ITEM;
+		pub const DepositFactor: Balance = DEPOSIT_STORAGE_BYTE;
+	}
+}
+
+pub mod pallet_migration {
+	use super::*;
+
+	parameter_types! {
+		pub const  MaxMigrationsPerPallet: u32 = 100;
 	}
 }
 
 pub mod did {
+	use parity_scale_codec::{Decode, Encode};
+	use scale_info::TypeInfo;
+
 	use super::*;
 
-	/// The size is checked in the runtime by a test.
-	pub const MAX_DID_BYTE_LENGTH: u32 = 9918;
+	///  Max length of a key (including its enum discriminants).
+	pub const MAX_KEY_LENGTH: u32 = 35;
 
-	pub const DID_DEPOSIT: Balance = deposit(2 + MAX_NUMBER_OF_SERVICES_PER_DID, MAX_DID_BYTE_LENGTH);
+	///  Max length of a single service entry.
+	/// It is the sum of:
+	/// - the maximum service ID length
+	/// - the maximum service type length * the maximum number of service types
+	///   for a single service
+	/// - the maximum service URL length * the maximum number of URLs for a
+	///   single service
+	/// - Additional padding bytes to make up for the different encoding size of
+	///   the different const values (each BoundedVec has additional bytes
+	///   encoded in compact form indicating the max length of the vec)
+	pub const MAX_SERVICE_ENDPOINT_BYTE_LENGTH: u32 = MAX_SERVICE_ID_LENGTH
+		+ MAX_NUMBER_OF_TYPES_PER_SERVICE * MAX_SERVICE_TYPE_LENGTH
+		+ MAX_NUMBER_OF_URLS_PER_SERVICE * MAX_SERVICE_URL_LENGTH
+		+ 8;
+
+	pub const DID_BASE_DEPOSIT: Balance = 2 * KILT;
+	pub const KEY_DEPOSIT: Balance = deposit(0, MAX_KEY_LENGTH);
+	pub const SERVICE_ENDPOINT_DEPOSIT: Balance = deposit(1, MAX_SERVICE_ENDPOINT_BYTE_LENGTH);
+
 	pub const DID_FEE: Balance = 50 * MILLI_KILT;
 	pub const MAX_KEY_AGREEMENT_KEYS: u32 = 10;
-	pub const MAX_URL_LENGTH: u32 = 200;
 	// This has been reduced from the previous 100, but it might still need
 	// fine-tuning depending on our needs.
 	pub const MAX_PUBLIC_KEYS_PER_DID: u32 = 20;
 	// At most the max number of keys - 1 for authentication
 	pub const MAX_TOTAL_KEY_AGREEMENT_KEYS: u32 = MAX_PUBLIC_KEYS_PER_DID - 1;
-	pub const MAX_ENDPOINT_URLS_COUNT: u32 = 3;
 	pub const MAX_BLOCKS_TX_VALIDITY: BlockNumber = HOURS;
 
 	pub const MAX_NUMBER_OF_SERVICES_PER_DID: u32 = 25;
 	pub const MAX_SERVICE_ID_LENGTH: u32 = 50;
 	pub const MAX_SERVICE_TYPE_LENGTH: u32 = 50;
 	pub const MAX_NUMBER_OF_TYPES_PER_SERVICE: u32 = 1;
-	pub const MAX_SERVICE_URL_LENGTH: u32 = 200;
-	pub const MAX_NUMBER_OF_URLS_PER_SERVICE: u32 = 1;
+	pub const MAX_SERVICE_URL_LENGTH: u32 = 2_000;
+	pub const MAX_NUMBER_OF_URLS_PER_SERVICE: u32 = 2;
 
 	parameter_types! {
+		#[derive(Debug, Clone, Eq, PartialEq, TypeInfo, Decode, Encode)]
 		pub const MaxNewKeyAgreementKeys: u32 = MAX_KEY_AGREEMENT_KEYS;
-		#[derive(Debug, Clone, PartialEq)]
-		pub const MaxUrlLength: u32 = MAX_URL_LENGTH;
+		#[derive(Clone)]
 		pub const MaxPublicKeysPerDid: u32 = MAX_PUBLIC_KEYS_PER_DID;
-		#[derive(Debug, Clone, PartialEq)]
+		#[derive(Debug, Clone, Eq, PartialEq)]
 		pub const MaxTotalKeyAgreementKeys: u32 = MAX_TOTAL_KEY_AGREEMENT_KEYS;
-		#[derive(Debug, Clone, PartialEq)]
-		pub const MaxEndpointUrlsCount: u32 = MAX_ENDPOINT_URLS_COUNT;
 		// Standalone block time is half the duration of a parachain block.
 		pub const MaxBlocksTxValidity: BlockNumber = MAX_BLOCKS_TX_VALIDITY;
-		pub const DidDeposit: Balance = DID_DEPOSIT;
+		pub const DidBaseDeposit: Balance = DID_BASE_DEPOSIT;
+		pub const KeyDeposit: Balance = KEY_DEPOSIT;
+		pub const ServiceEndpointDeposit: Balance = SERVICE_ENDPOINT_DEPOSIT;
 		pub const DidFee: Balance = DID_FEE;
 		pub const MaxNumberOfServicesPerDid: u32 = MAX_NUMBER_OF_SERVICES_PER_DID;
 		pub const MaxServiceIdLength: u32 = MAX_SERVICE_ID_LENGTH;
@@ -360,11 +496,14 @@ pub mod treasury {
 
 	pub const INITIAL_PERIOD_LENGTH: BlockNumber = BLOCKS_PER_YEAR.saturating_mul(5);
 	const YEARLY_REWARD: Balance = 2_000_000u128 * KILT;
+	#[allow(clippy::as_conversions)]
+	#[allow(clippy::integer_division)]
 	pub const INITIAL_PERIOD_REWARD_PER_BLOCK: Balance = YEARLY_REWARD / (BLOCKS_PER_YEAR as Balance);
 
 	parameter_types! {
 		pub const InitialPeriodLength: BlockNumber = INITIAL_PERIOD_LENGTH;
 		pub const InitialPeriodReward: Balance = INITIAL_PERIOD_REWARD_PER_BLOCK;
+		pub const PayoutPeriod: BlockNumber = DAYS * 30;
 	}
 }
 
@@ -400,22 +539,48 @@ pub mod web3_names {
 	}
 }
 
+pub mod dot_names {
+	use super::*;
+
+	const MIN_NAME_LENGTH: u32 = 3;
+	const MAX_NAME_LENGTH: u32 = 28;
+
+	pub const DOT_NAME_SUFFIX: &str = ".dot";
+	#[allow(clippy::as_conversions)]
+	pub const MIN_LENGTH: u32 = MIN_NAME_LENGTH + DOT_NAME_SUFFIX.len() as u32;
+	#[allow(clippy::as_conversions)]
+	pub const MAX_LENGTH: u32 = MAX_NAME_LENGTH + DOT_NAME_SUFFIX.len() as u32;
+
+	/// The size is checked in the runtime by a test.
+	pub const MAX_NAME_BYTE_LENGTH: u32 = 121;
+	pub const DEPOSIT: Balance = deposit(2, MAX_NAME_BYTE_LENGTH);
+
+	parameter_types! {
+		pub const Web3NameDeposit: Balance = DEPOSIT;
+		pub const MinNameLength: u32 = MIN_LENGTH;
+		pub const MaxNameLength: u32 = MAX_LENGTH;
+	}
+}
+
 pub mod preimage {
 	use super::*;
 	parameter_types! {
-		pub const PreimageMaxSize: u32 = 4096 * 1024;
 		pub const PreimageBaseDeposit: Balance = deposit(2, 64);
 	}
 }
+
+#[allow(clippy::decimal_literal_representation)]
+const MAXIMUM_REASON_LENGTH: u32 = 16384;
 
 pub mod tips {
 	use super::*;
 
 	parameter_types! {
-		pub const MaximumReasonLength: u32 = 16384;
+		pub const MaximumReasonLength: u32 = MAXIMUM_REASON_LENGTH;
 		pub const TipCountdown: BlockNumber = DAYS;
-		pub const TipFindersFee: Percent = Percent::from_percent(20);
+		pub const TipFindersFee: Percent = Percent::from_percent(0);
 		pub const TipReportDepositBase: Balance = deposit(1, 1);
+		pub const MaxTipAmount: Balance = 100_000 * KILT;
 	}
 }
 
@@ -427,6 +592,24 @@ pub mod fee {
 		/// a "virtual tip" that's equal to the `OperationalFeeMultiplier * final_fee`.
 		pub const OperationalFeeMultiplier: u8 = 5;
 		pub const TransactionByteFee: Balance = MICRO_KILT;
+	}
+}
+
+#[allow(clippy::as_conversions)]
+const MAX_SUBJECT_ID_LENGTH: u32 = kilt_asset_dids::MAXIMUM_ASSET_DID_LENGTH as u32;
+
+pub mod public_credentials {
+	use super::*;
+
+	/// The size is checked in the runtime by a test.
+	pub const MAX_PUBLIC_CREDENTIAL_STORAGE_LENGTH: u32 = 419;
+	// Each credential would have a different deposit, so no multiplier here
+	pub const PUBLIC_CREDENTIAL_DEPOSIT: Balance = deposit(1, MAX_PUBLIC_CREDENTIAL_STORAGE_LENGTH);
+
+	parameter_types! {
+		pub const Deposit: Balance = PUBLIC_CREDENTIAL_DEPOSIT;
+		pub const MaxEncodedClaimsLength: u32 = 100_000;	// 100 Kb
+		pub const MaxSubjectIdLength: u32 = MAX_SUBJECT_ID_LENGTH;
 	}
 }
 

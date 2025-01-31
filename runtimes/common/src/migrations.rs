@@ -1,5 +1,5 @@
 // KILT Blockchain – https://botlabs.org
-// Copyright (C) 2019-2022 BOTLabs GmbH
+// Copyright (C) 2019-2024 BOTLabs GmbH
 
 // The KILT Blockchain is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -16,48 +16,73 @@
 
 // If you feel like getting in touch with us, you can do so at info@botlabs.org
 
-use core::marker::PhantomData;
-use frame_support::traits::Get;
+use frame_support::{
+	traits::{GetStorageVersion, OnRuntimeUpgrade, PalletInfoAccess, StorageVersion},
+	weights::Weight,
+};
+use sp_core::Get;
+use sp_std::{fmt::Debug, marker::PhantomData};
+use sp_weights::RuntimeDbWeight;
 
-pub struct RemoveKiltLaunch<R>(PhantomData<R>);
-impl<R: frame_system::Config> frame_support::traits::OnRuntimeUpgrade for RemoveKiltLaunch<R> {
-	fn on_runtime_upgrade() -> frame_support::weights::Weight {
-		let prefix: [u8; 16] = sp_io::hashing::twox_128(b"KiltLaunch");
+const LOG_TARGET: &str = "migration::BumpStorageVersion";
 
-		let items = match frame_support::storage::unhashed::kill_prefix(&prefix, Some(6)) {
-			sp_io::KillStorageResult::AllRemoved(n) => {
-				log::info!("🚀 Successfully removed all {:?} storage items of the launch pallet", n);
-				n
-			}
-			sp_io::KillStorageResult::SomeRemaining(n) => {
-				log::warn!(
-					"🚀  Failed to remove all storage items of the launch pallet, {:?} are remaining",
-					n
-				);
-				n
-			}
-		};
-		<R as frame_system::Config>::DbWeight::get().writes(items.into())
+/// There are some pallets without a storage version.
+/// Based on the changes in the PR <https://github.com/paritytech/substrate/pull/13417>,
+/// pallets without a storage version or with a wrong version throw an error
+/// in the try state tests.
+pub struct BumpStorageVersion<T, W>(PhantomData<(T, W)>)
+where
+	T: GetStorageVersion + PalletInfoAccess,
+	T::CurrentStorageVersion: Debug + Into<StorageVersion>,
+	StorageVersion: PartialOrd<T::CurrentStorageVersion>,
+	W: Get<RuntimeDbWeight>;
+
+impl<T, W> OnRuntimeUpgrade for BumpStorageVersion<T, W>
+where
+	T: GetStorageVersion + PalletInfoAccess,
+	T::CurrentStorageVersion: Debug + Into<StorageVersion>,
+	StorageVersion: PartialOrd<T::CurrentStorageVersion>,
+	W: Get<RuntimeDbWeight>,
+{
+	#[cfg(feature = "try-runtime")]
+	fn pre_upgrade() -> Result<sp_std::vec::Vec<u8>, sp_runtime::TryRuntimeError> {
+		let (on_chain_version, current_version) = (T::on_chain_storage_version(), T::current_storage_version());
+		let pallet_name = T::name();
+		if on_chain_version < current_version {
+			log::trace!(target: LOG_TARGET, "Pallet {:?} to be migrated from version {:?} to version {:?}.", pallet_name, on_chain_version, current_version);
+		} else {
+			log::trace!(target: LOG_TARGET, "Pallet {:?} already on latest version {:?}. No migration will run.", pallet_name, current_version);
+		}
+		Ok([].into())
+	}
+
+	fn on_runtime_upgrade() -> Weight {
+		log::info!(target: LOG_TARGET, "Initiating migration.");
+
+		let (on_chain_version, current_version) = (T::on_chain_storage_version(), T::current_storage_version());
+		let pallet_name = T::name();
+
+		if on_chain_version < current_version {
+			log::trace!(target: LOG_TARGET, "Pallet {:?} to be migrated from version {:?} to version {:?}.", pallet_name, on_chain_version, current_version);
+			current_version.into().put::<T>();
+			W::get().reads_writes(1, 1)
+		} else {
+			log::trace!(target: LOG_TARGET, "Pallet {:?} already on latest version {:?}. No migration will run.", pallet_name, current_version);
+			W::get().reads(1)
+		}
 	}
 
 	#[cfg(feature = "try-runtime")]
-	fn pre_upgrade() -> Result<(), &'static str> {
-		let prefix: [u8; 16] = sp_io::hashing::twox_128(b"KiltLaunch");
+	fn post_upgrade(_state: sp_std::vec::Vec<u8>) -> Result<(), sp_runtime::TryRuntimeError> {
+		let (on_chain_version, current_version) = (T::on_chain_storage_version(), T::current_storage_version());
 
-		assert!(
-			sp_io::storage::next_key(&prefix).map_or(false, |next_key| next_key.starts_with(&prefix)),
-			"🚀 Pre check: Launch pallet storage does not exist!"
-		);
-		Ok(())
-	}
-
-	#[cfg(feature = "try-runtime")]
-	fn post_upgrade() -> Result<(), &'static str> {
-		let prefix: [u8; 16] = sp_io::hashing::twox_128(b"KiltLaunch");
-		assert!(
-			sp_io::storage::next_key(&prefix,).map_or(true, |next_key| !next_key.starts_with(&prefix)),
-			"🚀 Post check: Launch pallet storage still exists!"
-		);
-		Ok(())
+		if on_chain_version < current_version {
+			log::error!(target: LOG_TARGET, "Storage version for pallet {:?} was not updated to the latest version {:?}.", T::name(), current_version);
+			Err(sp_runtime::TryRuntimeError::Other(
+				"Pallet storage version was not updated to the latest version.",
+			))
+		} else {
+			Ok(())
+		}
 	}
 }

@@ -1,5 +1,5 @@
 // KILT Blockchain – https://botlabs.org
-// Copyright (C) 2019-2022 BOTLabs GmbH
+// Copyright (C) 2019-2024 BOTLabs GmbH
 
 // The KILT Blockchain is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -17,21 +17,26 @@
 // If you feel like getting in touch with us, you can do so at info@botlabs.org
 
 use clap::Parser;
-use sc_cli::RunCmd;
 
 #[derive(Debug, Parser)]
-pub struct Cli {
-	#[clap(subcommand)]
-	pub subcommand: Option<Subcommand>,
+#[command(
+	propagate_version = true,
+	args_conflicts_with_subcommands = true,
+	subcommand_negates_reqs = true
+)]
+pub(crate) struct Cli {
+	#[command(subcommand)]
+	pub(crate) subcommand: Option<Subcommand>,
 
-	#[clap(flatten)]
-	pub run: RunCmd,
+	#[command(flatten)]
+	pub(crate) run: sc_cli::RunCmd,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Parser)]
-pub enum Subcommand {
+pub(crate) enum Subcommand {
 	/// Key management cli utilities
-	#[clap(subcommand)]
+	#[command(subcommand)]
 	Key(sc_cli::KeySubcommand),
 
 	/// Build a chain specification.
@@ -56,16 +61,9 @@ pub enum Subcommand {
 	Revert(sc_cli::RevertCmd),
 
 	/// Sub-commands concerned with benchmarking.
-	#[clap(subcommand)]
+	#[command(subcommand)]
 	Benchmark(frame_benchmarking_cli::BenchmarkCmd),
 
-	/// Try some command against runtime state.
-	#[cfg(feature = "try-runtime")]
-	TryRuntime(try_runtime_cli::TryRuntimeCmd),
-
-	/// Try some command against runtime state. Note: `try-runtime` feature must
-	/// be enabled.
-	#[cfg(not(feature = "try-runtime"))]
 	TryRuntime,
 
 	/// Db meta columns information.

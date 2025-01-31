@@ -1,5 +1,5 @@
 // KILT Blockchain – https://botlabs.org
-// Copyright (C) 2019-2022 BOTLabs GmbH
+// Copyright (C) 2019-2024 BOTLabs GmbH
 
 // The KILT Blockchain is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -20,13 +20,10 @@
 use crate::{pallet::Config, types::BalanceOf};
 use parity_scale_codec::{Decode, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
+use serde::{Deserialize, Serialize};
 use sp_runtime::{traits::Saturating, Perquintill, RuntimeDebug};
 
-#[cfg(feature = "std")]
-use serde::{Deserialize, Serialize};
-
-#[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
-#[derive(Eq, PartialEq, Clone, Encode, Decode, Default, RuntimeDebug, TypeInfo)]
+#[derive(Eq, PartialEq, Clone, Encode, Decode, Default, RuntimeDebug, TypeInfo, Deserialize, Serialize)]
 pub struct RewardRate {
 	pub annual: Perquintill,
 	pub per_block: Perquintill,
@@ -40,6 +37,7 @@ impl MaxEncodedLen for RewardRate {
 }
 
 /// Convert annual reward rate to per_block.
+#[allow(clippy::arithmetic_side_effects)]
 fn annual_to_per_block(blocks_per_year: u64, rate: Perquintill) -> Perquintill {
 	rate / blocks_per_year.max(1)
 }
@@ -54,8 +52,8 @@ impl RewardRate {
 }
 
 /// Staking info (staking rate and reward rate) for collators and delegators.
-#[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
-#[derive(Eq, PartialEq, Clone, Encode, Decode, Default, RuntimeDebug, TypeInfo)]
+
+#[derive(Eq, PartialEq, Clone, Encode, Decode, Default, RuntimeDebug, TypeInfo, Serialize, Deserialize)]
 pub struct StakingInfo {
 	/// Maximum staking rate.
 	pub max_rate: Perquintill,
@@ -83,6 +81,7 @@ impl StakingInfo {
 	///
 	/// NOTE: If we exceed the max staking rate, the reward will be reduced by
 	/// max_rate / current_rate.
+	#[allow(clippy::arithmetic_side_effects)]
 	pub fn compute_reward<T: Config>(
 		&self,
 		stake: BalanceOf<T>,
@@ -98,8 +97,9 @@ impl StakingInfo {
 	}
 }
 
-#[cfg_attr(feature = "std", derive(Serialize, Deserialize))]
-#[derive(Eq, PartialEq, Clone, Encode, Decode, Default, RuntimeDebug, TypeInfo, MaxEncodedLen)]
+#[derive(
+	Eq, PartialEq, Clone, Encode, Decode, Default, RuntimeDebug, TypeInfo, MaxEncodedLen, Serialize, Deserialize,
+)]
 pub struct InflationInfo {
 	pub collator: StakingInfo,
 	pub delegator: StakingInfo,
